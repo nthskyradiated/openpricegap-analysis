@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"github.com/joho/godotenv"
 )
 
 type Stock struct {
@@ -57,14 +58,12 @@ var maxLossPerTrade = accountBalance * lossTolerance
 var profitPercent = .8
 
 
-var url = os.Getenv("URL")
-var apiKeyHeader = os.Getenv("APIKEYHEADER")
-var apiKey = os.Getenv("APIKEY")
-
-
-
-
 func main() {
+	err := godotenv.Load() // 👈 load .env file
+    if err != nil {
+    	log.Fatal(err)
+    }
+
 	stocks, err := Load("./opg.csv")
 	if err != nil {
 		log.Fatal(err)
@@ -187,6 +186,10 @@ func Calculate(gapPercent, openingPrice float64) Position {
 }
 
 func FetchNews(ticker string) ([]Article, error) {
+	var url = os.Getenv("URL")
+	var apiKeyHeader = os.Getenv("APIKEYHEADER")
+	var apiKey = os.Getenv("APIKEY")
+
 	req, err := http.NewRequest(http.MethodGet, url+ticker, nil )
 	if err != nil {
 		return nil, err
