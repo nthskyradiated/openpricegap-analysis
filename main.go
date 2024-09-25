@@ -56,11 +56,12 @@ var lossTolerance = 0.02
 var maxLossPerTrade = accountBalance * lossTolerance
 var profitPercent = .8
 
-const (
-	url = "https://seeking-alpha.p.rapidapi.com/news/v2/list-by-symbol?&size=5&id="
-	apiKeyHeader = "x-rapidapi-key"
-	apiKey = "d2fbf8e95cmsh2ac839720b38a1ep1e5ea5jsn6c607d3d8096"
-)
+
+var url = os.Getenv("URL")
+var apiKeyHeader = os.Getenv("APIKEYHEADER")
+var apiKey = os.Getenv("APIKEY")
+
+
 
 
 func main() {
