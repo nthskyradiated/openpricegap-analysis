@@ -1,237 +1,68 @@
 package main
 
 import (
-	"encoding/csv"
-	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
-	"math"
-	"net/http"
 	"os"
-	"slices"
-	"strconv"
-	"time"
+
 	"github.com/joho/godotenv"
+	"github.com/nthskyradiated/openpricegap-analysis/cmd"
+	"github.com/nthskyradiated/openpricegap-analysis/internal/news"
+	"github.com/nthskyradiated/openpricegap-analysis/internal/pos"
+	"github.com/nthskyradiated/openpricegap-analysis/internal/raw"
+	"github.com/nthskyradiated/openpricegap-analysis/internal/trade"
+	"github.com/nthskyradiated/openpricegap-analysis/pkg/csv"
+	"github.com/nthskyradiated/openpricegap-analysis/pkg/json"
+	"github.com/nthskyradiated/openpricegap-analysis/pkg/process"
+	"github.com/nthskyradiated/openpricegap-analysis/pkg/seekingalpha"
 )
-
-type Stock struct {
-	Ticker string
-	Gap float64
-	OpeningPrice float64
-}
-
-type Position struct {
-	EntryPrice float64
-	Shares int
-	TakeProfitPrice float64
-	StopLossPrice float64
-	Profit float64
-}
-
-type Selection struct {
-	Ticker string
-	Position
-	Articles []Article
-}
-
-type attributes struct {
-	PublishOn time.Time `json:"publishOn"`
-	Title string `json:"title"`
-}
-
-type seekingAlphaNews struct {
-	Attributes attributes `json:"attributes"`
-}
-
-type SeekingAlphaResponse struct {
-	Data []seekingAlphaNews `json:"data"`
-}
-
-type Article struct {
-	PublishOn time.Time
-	Headline string
-}
-
-var accountBalance = 10000.00
-var lossTolerance = 0.02
-var maxLossPerTrade = accountBalance * lossTolerance
-var profitPercent = .8
 
 
 func main() {
 	err := godotenv.Load() // 👈 load .env file
-    if err != nil {
-    	log.Fatal(err)
-    }
-
-	stocks, err := Load("./opg.csv")
 	if err != nil {
 		log.Fatal(err)
-		return
 	}
-
-	stocks = slices.DeleteFunc(stocks, func(s Stock) bool {
-		return math.Abs(s.Gap) < .1 })
-
-	var selections []Selection
-
-	selectionsChan := make(chan Selection, len(stocks))
-
-	for _, stock := range stocks {
-
-		go func(s Stock, selected chan <- Selection) {
-
-			position := Calculate(stock.Gap, stock.OpeningPrice)
 	
-			articles, err := FetchNews(stock.Ticker)
-			if err != nil {
-				log.Printf("error loading news about %s, %v", stock.Ticker, err)
-				selected <- Selection{}
-			} else {
-				log.Printf("Found %d articles about %s", len(articles), stock.Ticker)
-			}
-			sel := Selection {
-				Ticker: stock.Ticker,
-				Position: position,
-				Articles: articles,
-			}
+	var seekingAlphaURL = os.Getenv("URL")
+	var apiKey = os.Getenv("APIKEY") 
 
-			selected <- sel
-			
-			}(stock, selectionsChan)
-
-		}
-		for sel := range selectionsChan {
-			selections = append(selections, sel)
-			if len(selections) == len(stocks) {
-				close(selectionsChan)
-			}
-
+		// Validate environment variables
+		if seekingAlphaURL == "" {
+			fmt.Println("Missing variable: URL")
+			os.Exit(1)
 		}
 
-	outputPath := "./opg.json"
-	err = Deliver(outputPath, selections)
-	if err != nil {
-		log.Printf("Error writing output, %v", err)
-		return
-	}
-	log.Printf("Finished writing output to %s\n", outputPath)
-}
-
-func Load(path string) ([]Stock, error){
-	opg, err := os.Open(path)
-
-	if err != nil {
-		log.Fatal(err)
-		return nil, err
-	}
-
-	defer opg.Close()
-
-	r := csv.NewReader(opg)
-	rows, err := r.ReadAll()
-	if err != nil {
-		log.Fatal(err)
-		return nil, err 
-	}
-
-	rows = slices.Delete(rows, 0, 1)
-
-	var stocks []Stock
-
-	for _, row := range rows {
-		ticker := row[0]
-
-		gap, err := strconv.ParseFloat(row[1], 64)
-		if err != nil {
-			continue
+		if apiKey == "" {
+			fmt.Println("Missing variable APIKEY")
+			os.Exit(1)
 		}
+		
+	inputPath := flag.String("i", "", "Path to input file (required)")
+	accountBalance := flag.Float64("b", 0.0, "Account balance (required)")
+	outPath := flag.String("o","./opg.json", "Path to outputfile")
+	lossTolerance := flag.Float64("l", 0.02, "Loss tolerance percentage")
+	profitPercent := flag.Float64("p", 0.8, "Percentage of the gap to take as profit")
+	minGap := flag.Float64("m", 0.1, "Minimum gap value to consider")
 
-		openingPrice, err := strconv.ParseFloat(row[2], 64)
-		if err != nil {
-			continue
-		}
+	flag.Parse()
 
-
-		stocks = append(stocks, Stock{
-			Ticker: ticker,
-			Gap: gap,
-			OpeningPrice: openingPrice,
-		})
+	if *inputPath =="" || *accountBalance == 0.0 {
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
-	return stocks, err
-}
 
-func Calculate(gapPercent, openingPrice float64) Position {
+	var loader raw.Loader = csv.NewLoader(*inputPath)
+	var f raw.Filterer = process.NewFilterer(*minGap)
+	var c pos.Calculator = process.NewCalculator(*accountBalance, *lossTolerance, *profitPercent)
+	var fet news.Fetcher = seekingalpha.NewClient(seekingAlphaURL, apiKey)
+	var del trade.Deliverer = json.NewDeliverer(*outPath)
 
-	closingPrice := openingPrice / (1 + gapPercent)
-	gapValue := closingPrice - openingPrice
-	profitFromGap := profitPercent * gapValue
-
-	stopLoss := openingPrice - profitFromGap
-	takeProfit := openingPrice + profitFromGap
-
-	shares := int(maxLossPerTrade / math.Abs(stopLoss - openingPrice))
-
-	profit := math.Abs(openingPrice - takeProfit) * float64(shares)
-	profit = math.Round(profit*100) / 100
-
-	return Position{
-		EntryPrice: math.Round(openingPrice*100) / 100,
-		Shares: shares,
-		TakeProfitPrice: math.Round(takeProfit*100) / 100,
-		StopLossPrice: math.Round(stopLoss*100) / 100,
-		Profit: math.Round(profit*100) / 100,
-	}
-}
-
-func FetchNews(ticker string) ([]Article, error) {
-	var url = os.Getenv("URL")
-	var apiKeyHeader = os.Getenv("APIKEYHEADER")
-	var apiKey = os.Getenv("APIKEY")
-
-	req, err := http.NewRequest(http.MethodGet, url+ticker, nil )
+	err = cmd.Run(loader, f, c, fet, del)
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Add(apiKeyHeader, apiKey)
-
-	client := &http.Client{}
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, err
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
-	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return nil, fmt.Errorf("error Code Received %d", res.StatusCode)
-	}
-
-	resp := &SeekingAlphaResponse{}
-	json.NewDecoder(res.Body).Decode(resp)
-
-	var articles []Article
-
-	for _, item := range resp.Data {
-		art := Article {
-			PublishOn: item.Attributes.PublishOn,
-			Headline: item.Attributes.Title,
-		}
-		articles = append(articles, art)
-	}
-	return articles, nil
-}
-
-func Deliver(filePath string, selections []Selection) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("error creating file: %w", err)
-	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	err = encoder.Encode(selections)
-	if err != nil {
-		return fmt.Errorf("error encoding selections: %w", err)
-	}
-	return nil
 }
